@@ -8177,6 +8177,111 @@ rejected: nothing runs on either side.
   faces. It is unreachable today (`MergeInterval` makes no topology until
   `intersect.curve_class_p2`); that unit's porter must give the healer a typed resolver.
 
+## blend.fillet_intersector (PR #179)
+
+- **FlushCurve with two or more points cannot run standalone in C++.** Past the span
+  equalisation it calls `SmFilletSolver::GetSelfIntersectionHandler`, which reads
+  `m_pExecutive` (never initialised by the `SmFilletSolver` constructor, only set inside an
+  `SmFilletExecutive`), then writes the rails of `GetLastFilletGeom()`, whose
+  `SmFilletGeom(solver)` constructor leaves `m_vRails` `NULL`. The FFI therefore rejects a
+  `FlushCurve` of more than one point; the Rust side evaluates the offset rails, stops at
+  `GetSelfIntersectionHandler` (`blend.fillet_solver_p1`) and is covered by unit tests. The 0/1-point paths
+  (empty list `SM_ERR_NULL_POINTER`, boundary-touch flag, list cleared) are compared.
+- **Span tests over a plane are deferred.** `TestSpanAccuracy` / `ComputeNextPoint` map Hermite
+  UV spans through `SmCrvOnSurf`, whose Rust port holds a `BSplineSurface`; `SmPlane::Evaluate`
+  overrides the B-spline evaluation, so a plane is a dispatch gap (`curve.crv_on_surf`), not a
+  B-spline stand-in. B-spline surfaces run the full span test (mid-point solve included).
+- **Solver calls.** Everything behind `StepSolve`, `ComputePointValues`,
+  `ComputeSurfaceValues` and `PointOnPlaneSolve` defers until `blend.fillet_solver_p1..p4`
+  implement `FilletSolverOps`; the C++ side still runs these cases against a real
+  `SmConstantRadiusFS` (no crash in 6000 generated cases).
+- **StepSolve is in/out (review fix).** `SmFilletSolver::StepSolve` takes `double& rdStep`
+  and rescales a clipped step into it (`SmFilletSolver.cpp:5228`, `:5402`); `ComputeNextPoint`
+  then uses the rescaled step for `rNextTSP.m_dCurveParameter`, the Hermite UV spans, the
+  `1000*SM_EFF_ZERO` angle-reject threshold and the `sDiff / dStep` of the through-point
+  derivative fix. Its flags are set at entry (`rbClipped = TRUE` before later `SER` exits)
+  and copied even when it fails. `FilletSolverOps::step_solve` therefore takes
+  `step_size: &mut f64` and `flags: &mut StepSolve` out-params; implementers
+  (`blend.fillet_solver_p3`) must write both as upstream does. Fixture
+  `rv_next_clipped_step` (step 0.5 from 0.9, domain clipped at u=1) pins the C++ answer:
+  next `curve_parameter = 1.0` with `clipped = 1` (deferred until StepSolve is ported).
+- **Virtual dispatch gap (for the solver porters).** `SmFilletIntersector` overrides
+  `ComputeNextPoint`, `FlushCurve`, `ComputePointValues` and `TestSpanAccuracy`; the Rust
+  port has them as inherent methods only, so `TraceCurve` / `DoPointIntersection` /
+  `DoLawIntersection` (`intersect.surface_intersector_p4`) run on a `FilletIntersector`'s base
+  still call the basic intersector's versions. Before a solver unit traces a fillet through
+  those drivers, `intersect::surface_intersector` needs a hook trait the fillet intersector
+  implements.
+- **Surface aliasing.** Every upstream caller (`SmFilletSolver.cpp:2037`,
+  `SmFilletStandardSolver.cpp:2273`/`:4721`, `SmFilletGeom.cpp:11627`) builds the intersector
+  over the solver's own `SmOffsetSurface`s, and `TestSpanAccuracy` / `ComputeNextPoint` rely on
+  `SetSurfacesToZeroOffset` changing them. The Rust intersector borrows separate `&Surface`s,
+  so zeroing the solver's offsets does not reach it; the shim and runner also build both sides
+  over the base surfaces, so the offset-surface configuration is not compared. Solver porters
+  must pass the surfaces deliberately (or add a solver-backed surface accessor).
+- **FlushCrv guard kept.** The FFI still rejects `sm_FlushCrv` inputs whose polygon does not
+  have `3 (knots - 1) + 1` points or whose knots are not strictly increasing:
+  `CreateCanonical` then indexes NLIB arrays from the polygon size and the expanded knot
+  vector, which are out of bounds or degenerate (multiplicity above degree + 1); whether
+  NLIB tolerates the repeated-knot case was not established, so those `CreateCanonical`
+  error paths are not compared.
+- **Aliased points.** `ComputeNextPoint` with `prev == next` returns no point for a
+  non-crossing point (as upstream, which returns before touching either reference) and
+  `InvalidInput` for a crossing (upstream would read and write one object at once).
+
+## topology.brep_p10 (`SmBrep::MakeTopologyFromData`, PR #130): review fixes
+
+- **UV trim curve cast.** Upstream stores an edge use's UV trim curve as
+  `pNewEU1->m_pUVTrimCurve = SM_CAST_PTR(SmBSplineCurve, pNewUV)`, which is NULL for a
+  copy that is not an `SmBSplineCurve` (composite, offset, projected, curve-on-surface,
+  ...). The copy is still made, gets the attributes and gets its owner set, but is not
+  stored. The first port always stored it. A version-38 file whose UV curve 0 is an
+  `SmCompositeCurve` (`fixtures/topology.brep_p10/uv_composite_v38.smb`) showed the
+  difference in the exported value stream; fixed.
+- **Coverage.** The upstream `.smb` files contain no valid wire-edge shells, vertex
+  shells, vertex loops (loop type 1 with an eu_type 1 record) or analytic edge-curve
+  replacements. Crafted fixtures `wire_vertex{,_nm}.smb`, `wire_quad_{full,sub,rev_nm}.smb`
+  (a collinear quadratic edge curve with full / sub-range / reversed interval, so both
+  outcomes of the `CreateAnalyticCurve` end-point check run) and `uv_bspline.smb` cover
+  them (`review_cases.json`, 128 cases). They use axis-aligned planes, so the analytic
+  paths are compared instead of being deferred by `SmCone::IsNurbSurfaceCone`
+  (surface.cone_p2).
+- **Known harness limits.** The shim refuses the closure / remove-all / project ops
+  after a `Set` patch: its guard proves only that `MakeTopologyFromData`'s record
+  indexing is defined, not that the graph it builds is consistent enough for the later
+  walks (an inconsistent loop or radial list can make them loop or read freed
+  objects). The generator never emits `Op::Project`; add it once topology.brep_p1
+  (`CreateParallelProjectionCurves`) lands. An `SmConic` UV curve cannot reach the
+  cast: `SmConic` has no `Copy`, so both sides fail at the copy and agree.
+- **Second review (2026-10-19, after topology.brep_p1 #145 merged).** Main's `Brep` now
+  holds `m_bEditingEnabled`, `region_list_head` and the face/edge/vertex lists; this PR's
+  duplicate `editing_enabled` was dropped and `Brep::new_with_infinite_region` sets
+  `region_list_head` to the infinite region (`PreInsert`). The six
+  `UNPORTED(topology.brep_p1)` sites now call `p1::add_attributes` (new
+  `TopologyEnv::all_attributes` = `rAllAttributes`; the B-rep, loop uses and face uses
+  receive their own lists), `p1::heal_brep(.., HealerOpType::All, None, None, None,
+  bMakeUVTrimCurves)`, `p1::regions`, `p1::faces`, `p1::wire_edges`,
+  `p1::create_parallel_projection_curves` (approx tol `&dTol`, NULL projection distance,
+  all three outputs) and `p1::find_side_of_curve`. The HealBrep cases now defer at
+  `SmFace::GetTolerance` (topology.face_p2, 63). topology.brep_p7's two
+  `UNPORTED(topology.brep_p10)` sites are wired: `ReadFromFile` (now `&mut Kernel` plus a
+  `TopologyEnv`, with an empty `sAttributes` as upstream) and `GlueEdgesGeneral`'s
+  `TestClosureSplitRegion(TRUE, edge)`; its 30 brep_p10 deferrals now defer at
+  surface.cone_p2 (24) and topology.face_p2 (6), 0 failed. Unit totals: 1404 cases, 839
+  passed, 0 failed, 565 deferred, `--perturb` SENSITIVE 839/839.
+- **Open (not fixed here).** (1) Geometry attributes are not copied when a shared data
+  surface/curve or a borrowed geometry is copied (upstream's `SmAObject` copy constructor
+  copies them; `a_object::copy_construct(env.attributes, from, to)` would match). The
+  harness cannot see it (ReadFromFile reads no attributes, the shim exports none) and no
+  unit calls `copy_construct` yet, so this needs a codebase-wide decision. (2) The shim
+  export walks only from the regions: face uses on no shell and vertices with no uses are
+  never compared; exporting `m_pFaceListHead` / `m_pEdgeListHead` / `m_pVertexListHead`
+  in list order would close that. (3) The topology.vertex, topology.edgeuse_p1/p2 and
+  topology.loopuse runners still label their inexact `.smb` imports
+  `topology.brep_p10 SmBrep::MakeTopologyFromData` (harness deferrals, not code stubs);
+  they could now read the file through `p7::read_from_file`. (4) topology.brep_p7's
+  `cpp-guard:unvalidated-topology` read guard (UB-164) is still in place.
+
 ## topology.brep_p7 (`SmBrep.cpp` part 7: `ReadFromFile`, `MakeFace`, `MakeFaceWithCurves`, `GlueEdgesGeneral`, `CopyFaces`, `MergeSelfIntersectionCurves`; PR #155, 2026-10-16; partial, no disagreements)
 
 - **Mostly deferred by design.** Every path that builds topology reaches an unported
