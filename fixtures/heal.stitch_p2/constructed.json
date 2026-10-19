@@ -1151,7 +1151,7 @@
    "upstream_ref": "tests/SM_API_test/src/TestSmBrep.cpp TestSmStitchIntoShell"
   },
   {
-   "name": "pair_gap0_shell_hang23",
+   "name": "pair_gap0_shell_underflow",
    "inputs": {
     "brep": {
      "kind": "sheets",

@@ -27,19 +27,21 @@
 //!   gluing rescans a vertex at most `edges + 2` times (each successful glue removes an
 //!   edge); `StitchIntoSolid` / `StitchIntoShell` double the tolerance at most
 //!   [`MAX_TOL_DOUBLINGS`] times (upstream never terminates from a zero tolerance,
-//!   HANG-23/HANG-24 in `plan/upstream-issues.md`);
+//!   HANG-35/HANG-24 in `plan/upstream-issues.md`);
 //!   `SplitEdgesWithVertices` splits at most as many edges per vertex as the edge list
 //!   held when that vertex started (a split puts the vertex at both new edge ends).
 //!   Past a bound the port returns [`SolidError::InvalidInput`].
 //! - `DoStitching` collects the modified faces (`sModifiedFaces`) as upstream, though
 //!   only commented-out code reads them; its `dMinEdgeLength` is dropped for the same
 //!   reason (the lengths are still computed).
-//! - The calls into `SmBrep::Notify` (`topology.brep_p2`), `CalculateBoundingBox`
-//!   (`query.brep`), `DeleteFace`, `SqueezeEdge` (`topology.brep_p3`), `GlueVertices`,
-//!   `FindAndSetInfiniteRegion` (`topology.brep_p5`), `GlueEdgesGeneral`
-//!   (`topology.brep_p7`), `MakeVertexSplitEdge` (`topology.brep_p9`, through
-//!   [`test_and_split_edge`]) and `SmFace::IsLamina`, `IsDegenerate`, `Notify`
-//!   (`topology.face_p3`) return [`SolidError::Unported`].
+//! - `GlueVertices`, `FindAndSetInfiniteRegion` (`topology.brep_p5`),
+//!   `GlueEdgesGeneral` (`topology.brep_p7`), `MakeVertexSplitEdge`
+//!   (`topology.brep_p9`, through [`test_and_split_edge`]) and `SmFace::IsLamina`,
+//!   `IsDegenerate`, `Notify` (`topology.face_p3`) call those units; the face and edge
+//!   notifications run on records local to the call (the B-rep carries no attributes
+//!   or caches). The calls into `SmBrep::Notify` (`topology.brep_p2`),
+//!   `CalculateBoundingBox` (`query.brep`), `DeleteFace` and `SqueezeEdge`
+//!   (`topology.brep_p3`) return [`SolidError::Unported`].
 
 use super::p1::{
     brep_notify_pre_edit, glue_edges_general, glue_vertices, set_point, sort_by_param,
@@ -58,7 +60,8 @@ use crate::math::{Vec3, BIG_DOUBLE};
 use crate::nurbs::b_spline_curve::p2::BoundingBoxRequest;
 use crate::nurbs::b_spline_surface_n_lib::p2::OrientType;
 use crate::topology::brep::p1::{self as bp1, SetRegionVoidType};
-use crate::topology::{edge, vertex, Brep, EdgeId, FaceId, RegionId, ShellId, VertexId};
+use crate::topology::face::p3 as face_p3;
+use crate::topology::{edge, loopuse, vertex, Brep, EdgeId, FaceId, RegionId, ShellId, VertexId};
 use crate::{Result, SolidError};
 
 const OP: &str = "heal::stitch::p2";
@@ -269,7 +272,9 @@ impl Stitch<'_> {
             let zone_tol = zone_tol3d(k, tol_3d / 2.0);
             for f in bp1::faces(b, None)? {
                 // when face is a lamina sliver
-                if face_is_lamina(b, f)? && face_is_degenerate(k, b, f, true, Some(zone_tol))? {
+                if face_p3::is_lamina(b, f)?
+                    && face_p3::is_degenerate(k, b, f, true, Some(zone_tol))?
+                {
                     // delete Face and its boundary edges and vertices from the Brep
                     ignore_status(delete_face(k, b, f, true, true, None, None))?;
                 }
@@ -436,7 +441,7 @@ impl Stitch<'_> {
             // corresponds to 3d distance.
             let s_vec = Vec3::new(1.0, 1.0, 1.0).unitize()?;
 
-            let mut wire_edges = bp1::wire_edges(b, None)?;
+            let wire_edges = bp1::wire_edges(b, None)?;
 
             // for every vertex - label lamina vertices and store common line
             // projection parameter for later sorting
@@ -571,13 +576,13 @@ impl Stitch<'_> {
                         if do_squeeze {
                             squeeze_edge_to(b, squeeze_edge, v)?;
                         } else if do_glue {
-                            glue_vertices(b, v, cv, Some(&mut wire_edges))?;
+                            glue_vertices(k, b, v, cv, Some(&wire_edges))?;
                         }
                     } else {
                         if do_squeeze {
                             squeeze_edge_to(b, squeeze_edge, cv)?;
                         } else if do_glue {
-                            glue_vertices(b, cv, v, Some(&mut wire_edges))?;
+                            glue_vertices(k, b, cv, v, Some(&wire_edges))?;
                         }
                         v = cv;
                     }
@@ -615,13 +620,12 @@ impl Stitch<'_> {
         if out.stitched_edges > 0 {
             ignore_status(brep_notify_pre_edit(b))?;
             for f in bp1::faces(b, None)? {
-                ignore_status(face_notify(
+                // pF->Notify(SM_NO_PRE_EDIT, pF, SM_NO_GET_BREP(pF) (null), NULL)
+                ignore_status(loopuse::face_notify_data(
                     b,
                     f,
                     NotifyOperation::PreEdit,
-                    Some(EntityRef::Face(f)),
-                    false, // SM_NO_GET_BREP(pF)
-                    None,
+                    [Some(EntityRef::Face(f)), None, None],
                 ))?;
             }
         }
@@ -631,13 +635,8 @@ impl Stitch<'_> {
         if self.do_region_nesting && bp1::regions(b, None)?.len() > 1 {
             let old = b.editing_enabled();
             b.set_editing_enabled(false);
-            let r = find_and_set_infinite_region(
-                k,
-                b,
-                None,
-                SetRegionVoidType::InfiniteRegionSwap,
-                None,
-            );
+            let r =
+                find_and_set_infinite_region(b, None, SetRegionVoidType::InfiniteRegionSwap, None);
             b.set_editing_enabled(old);
             r?;
         }
@@ -859,6 +858,7 @@ impl Stitch<'_> {
                         add_unique(modified_faces, f);
                     }
                     match glue_edges_general(
+                        k,
                         b,
                         keep,
                         orientation,
@@ -1068,14 +1068,14 @@ impl Stitch<'_> {
                     if do_squeeze {
                         squeeze_edge_to(b, squeeze_edge, v)?;
                     } else if do_glue {
-                        glue_vertices(b, v, cv, None)?;
+                        glue_vertices(k, b, v, cv, None)?;
                     }
                     out.deleted.push(cv);
                 } else {
                     if do_squeeze {
                         squeeze_edge_to(b, squeeze_edge, cv)?;
                     } else if do_glue {
-                        glue_vertices(b, cv, v, None)?;
+                        glue_vertices(k, b, cv, v, None)?;
                     }
                     out.deleted.push(v);
                     v = cv;
@@ -1195,7 +1195,7 @@ impl Stitch<'_> {
                     set_point(k, b, v, mid)?;
 
                     // (status not checked)
-                    ignore_status(glue_vertices(b, v, new_v, None))?;
+                    ignore_status(glue_vertices(k, b, v, new_v, None))?;
                     out.processed.push(v);
                     set_none(verts, ii)?;
 
@@ -1480,61 +1480,21 @@ fn delete_face(
 }
 
 /// `SmBrep::FindAndSetInfiniteRegion(pOptShellToTest, eVoidSettingFlag, pOptBrepBBox)`
-/// (unit `topology.brep_p5`; upstream defaults `NULL`, `SM_VS_INFINITEREGION_SWAP`,
-/// `NULL`).
+/// (upstream defaults `NULL`, `SM_VS_INFINITEREGION_SWAP`, `NULL`):
+/// [`crate::topology::brep::p5::find_and_set_infinite_region`], which takes the native
+/// `SmSetRegionVoidType` code.
 pub(crate) fn find_and_set_infinite_region(
-    k: &mut Kernel,
     b: &mut Brep,
     shell_to_test: Option<ShellId>,
     void_setting: SetRegionVoidType,
-    brep_bbox: Option<&Extent3d>,
+    brep_bbox: Option<&mut Extent3d>,
 ) -> Result<()> {
-    let _ = (k, b, shell_to_test, void_setting, brep_bbox);
-    // UNPORTED(topology.brep_p5): SmBrep::FindAndSetInfiniteRegion
-    Err(SolidError::unported(
-        "SmBrep::FindAndSetInfiniteRegion",
-        "topology.brep_p5",
-    ))
-}
-
-/// `SmFace::IsLamina` (unit `topology.face_p3`).
-fn face_is_lamina(b: &Brep, f: FaceId) -> Result<bool> {
-    let _ = (b, f);
-    // UNPORTED(topology.face_p3): SmFace::IsLamina
-    Err(SolidError::unported("SmFace::IsLamina", "topology.face_p3"))
-}
-
-/// `SmFace::IsDegenerate(bSkipQuickCheck, pOptZoneTol3d)` (unit `topology.face_p3`;
-/// upstream defaults `FALSE`, `NULL`).
-fn face_is_degenerate(
-    k: &Kernel,
-    b: &Brep,
-    f: FaceId,
-    skip_quick_check: bool,
-    zone_tol_3d: Option<f64>,
-) -> Result<bool> {
-    let _ = (k, b, f, skip_quick_check, zone_tol_3d);
-    // UNPORTED(topology.face_p3): SmFace::IsDegenerate
-    Err(SolidError::unported(
-        "SmFace::IsDegenerate",
-        "topology.face_p3",
-    ))
-}
-
-/// `SmFace::Notify(eNotifyOperation, pData1, pData2, pData3)` (unit
-/// `topology.face_p3`); `data2_is_brep` stands for `pData2` being the face's B-rep,
-/// else null (`SM_NO_GET_BREP(pF)` is null).
-fn face_notify(
-    b: &mut Brep,
-    f: FaceId,
-    operation: NotifyOperation,
-    data1: Option<EntityRef>,
-    data2_is_brep: bool,
-    data3: Option<EntityRef>,
-) -> Result<()> {
-    let _ = (b, f, operation, data1, data2_is_brep, data3);
-    // UNPORTED(topology.face_p3): SmFace::Notify
-    Err(SolidError::unported("SmFace::Notify", "topology.face_p3"))
+    let code = match void_setting {
+        SetRegionVoidType::NestedSolid => 0,        // SM_VS_NESTEDSOLID
+        SetRegionVoidType::InfiniteRegionOnly => 1, // SM_VS_INFINITEREGION_ONLY
+        SetRegionVoidType::InfiniteRegionSwap => 2, // SM_VS_INFINITEREGION_SWAP
+    };
+    crate::topology::brep::p5::find_and_set_infinite_region(b, shell_to_test, code, brep_bbox)
 }
 
 #[cfg(test)]
