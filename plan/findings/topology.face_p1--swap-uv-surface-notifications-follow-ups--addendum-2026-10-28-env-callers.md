@@ -23,5 +23,9 @@ Remaining:
   the other operand to this call.
 - **`heal.stitch_p1` comparison.** `UnifyNormals` now notifies, but the `heal.stitch_p1`
   runner does not compare its events yet (that runner is being reworked in #1297).
+- **Multi-face `OrientSheetSurfaces`.** No `topology.brep_p9` fixture is a multi-face sheet
+  with mixed face orientations, so the per-face swap branch (the marked walk over face-use
+  neighbours) is not compared against the C++. All 4 swapping cases take the single-face
+  `SwapUV` branch. Fix: add such a sheet fixture and compare its tracker events.
 
 Item 2 (owner links of nested surfaces) is unchanged.
