@@ -1048,8 +1048,11 @@ const CONVENTIONS: crate::own_builder::Conventions<'static> = crate::own_builder
 /// shim-built sources are built by the Rust kernel ([`crate::own_builder`], the
 /// shim's `editing` flag applied after); `.smb` files are imported from the shim's
 /// export ([`rust_brep`]).
-fn own_brep(k: &mut Kernel, i: &Inputs) -> Result<Result<(Brep, [usize; 10]), Output>, HarnessError> {
-    use crate::own_builder::{build_with, build_status, counts, Built};
+fn own_brep(
+    k: &mut Kernel,
+    i: &Inputs,
+) -> Result<Result<(Brep, [usize; 10]), Output>, HarnessError> {
+    use crate::own_builder::{build_status, build_with, counts, Built};
     let src: super::topology_edgeuse_p1::BrepIn = serde_json::to_value(&i.brep)
         .and_then(serde_json::from_value)
         .map_err(|e| harness(format!("B-rep source: {e}")))?;
@@ -1064,7 +1067,9 @@ fn own_brep(k: &mut Kernel, i: &Inputs) -> Result<Result<(Brep, [usize; 10]), Ou
         }
         Some(Built::Failed(e)) => match Output::unported(&e) {
             Some(o) => Ok(Err(o)),
-            None => Ok(Err(Output::new().values("out", vec![-1.0, build_status(&e)]))),
+            None => Ok(Err(
+                Output::new().values("out", vec![-1.0, build_status(&e)])
+            )),
         },
         None => {
             let (path, h, c) = match prepare(i)? {
