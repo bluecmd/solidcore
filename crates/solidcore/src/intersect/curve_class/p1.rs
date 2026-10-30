@@ -2072,6 +2072,9 @@ pub fn get_cci_geometry_in<'g, O: ClassObject, G: ClassGeometry<O>>(
         out.emate = geometry.topology_intersector_mate(ti, edge).ok_or(
             // UNPORTED(boolean.topology_intersector_p1): SmTopologyIntersector::GetOtherMate
             // (an adapter that cannot reach the intersector behind its handle)
+            // Proof (unreachable): only if topology_intersector() is Some and the adapter
+            // returns no mate; the library ClassGeometry impls resolve it; 0 hits in the
+            // green difftest sweep.
             SolidError::unported(
                 "SmTopologyIntersector::GetOtherMate",
                 "boolean.topology_intersector_p1",
@@ -2163,6 +2166,8 @@ fn cci_edge_of<O: ClassObject>(
         )),
         // UNPORTED(topology.edge): SmEdge::GetFaces (an adapter that cannot resolve the
         // edge handle to its B-rep)
+        // Proof (unreachable): the library ClassGeometry impls resolve the edge handle
+        // (topology_entity/_mut); 0 hits in the green difftest sweep.
         None => Err(SolidError::unported("SmEdge::GetFaces", "topology.edge")),
     }
 }
@@ -2228,6 +2233,8 @@ pub fn apply_point_solution<O, S: Copy>(
     if input.edge.is_some() {
         // this entry point has no B-rep for the edge ([`apply_point_solution_in`] has)
         // UNPORTED(topology.edge): SmEdge::GetCurve
+        // Proof (unreachable): B-rep-less entry point; library callers use the `_in` twin,
+        // only difftest and a unit test call this one; 0 hits in the green difftest sweep.
         return Err(SolidError::unported("SmEdge::GetCurve", "topology.edge"));
     }
     apply_point_solution_impl(
@@ -2749,6 +2756,9 @@ pub fn compute_face_point_class<O: ClassObject>(
 ) -> Result<()> {
     let _ = (point, src_zone_tol_3d, face, point_class);
     // UNPORTED(topology.face_p2): SmFace::GetSurface
+    // Proof (unreachable): trait default of FaceQueries::compute_face_point_class; the
+    // B-rep-backed impl uses compute_face_point_class_in; 0 hits in the green difftest
+    // sweep.
     Err(SolidError::unported(
         "SmFace::GetSurface",
         "topology.face_p2",
@@ -2996,11 +3006,10 @@ fn surface_approximate_size(k: &Kernel, surface: &Surface) -> Result<Vec2> {
 /// `SmSurface::GlobalPointSolve(domain, SM_SO_MINIMIZE, point, 0.001 * |size|, &maxDrop,
 /// SM_SR_SINGLE, sols)` over the natural domain (`maxDrop` is `1.0`): the gap and UV
 /// point of the first solution, if any. The status is ignored (`SmCurveClass.cpp:1045`
-/// checks only the solution count), so a failed solve is an empty result. Upstream's
-/// temporary switch-off of the surface cache's point test (`m_bPointTestEnabled`,
-/// `:1040`) is moot here: the solver builds no cache for a surface that owns no face,
-/// and a face-owned one is `Unported` in the solver (`UNPORTED(query.face_p2)`; the
-/// switch must be added with it).
+/// checks only the solution count), so a failed solve is an empty result. Upstream
+/// switches the surface cache's point test off for the solve (`m_bPointTestEnabled`,
+/// `:1040`), so its solutions are not classified against a face's trim boundaries
+/// ([`Surface::global_point_solve_point_test_off`]).
 fn surface_global_point_solve(
     k: &Kernel,
     surface: &Surface,
@@ -3009,7 +3018,7 @@ fn surface_global_point_solve(
 ) -> Result<Option<(f64, Point2)>> {
     let tol = 0.001 * size.length();
     let solutions = ignored(
-        surface.global_point_solve::<crate::surface::surface::p4::NoObject>(
+        surface.global_point_solve_point_test_off::<crate::surface::surface::p4::NoObject>(
             k,
             Some(crate::surface::surface::p4::NoObject),
             &surface.natural_uv_domain_with_nurb(k)?,

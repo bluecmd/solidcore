@@ -1099,7 +1099,9 @@ impl Surface {
             Ok(blend) => blend,
             // too few intersection parameters: upstream reads and writes past the end of
             // its array here (UB-157), which the port does not reproduce
-            Err(e @ SolidError::InvalidInput { .. }) => return Err(e),
+            Err(e @ (SolidError::InvalidInput { .. } | SolidError::PortInvariant { .. })) => {
+                return Err(e)
+            }
             Err(e) if e.is_unported() => return Err(e),
             // a NULL blend surface
             Err(_) => return Err(SolidError::sm_err(OP_BLEND)),
@@ -2499,17 +2501,15 @@ impl Surface {
         gs.surface_cache = Some(surface_cache);
         gs.face_queries = face_queries;
         // the solutions name the trees' owners (LocalSolve: the curve, sm_GetOriginalSurface)
+        let surface_domain = surface_cache.surface().natural_uv_domain_with_nurb(k)?;
         gs.operands = Some(SolveOperands {
             operands: [
                 curve_tree
                     .owner_object()?
                     .map(|h| (h, OperandDomain::Curve(curve.natural_interval()))),
-                surface_tree.owner_object()?.map(|h| {
-                    (
-                        h,
-                        OperandDomain::Surface(surface_cache.surface().natural_uv_domain()),
-                    )
-                }),
+                surface_tree
+                    .owner_object()?
+                    .map(|h| (h, OperandDomain::Surface(surface_domain))),
             ],
         });
 
@@ -3281,7 +3281,7 @@ pub fn intersect_srf_bndry_crv(
     };
 
     // specify CurveSurface 3DIsoParameterCurve
-    let iso = super::p6::boundary_iso_curve(curve_surface, param, iso_parameter, true)?;
+    let iso = super::p6::boundary_iso_curve(k, curve_surface, param, iso_parameter, true)?;
 
     // skip degenerate curves
     if iso.is_degenerate(k, EFF_ZERO, None)? {
@@ -3391,7 +3391,7 @@ mod tests {
         let r = s.base_global_line_intersect::<NoObject>(
             &k,
             NoObject,
-            &s.natural_uv_domain(),
+            &s.natural_uv_domain_if_built(),
             Vec3::ZERO,
             Vec3::ZERO,
             None,
@@ -3402,7 +3402,7 @@ mod tests {
         assert!(s
             .local_line_intersect(
                 &k,
-                &s.natural_uv_domain(),
+                &s.natural_uv_domain_if_built(),
                 Vec3::ZERO,
                 Vec3::ZERO,
                 &Extent1d::from_min_max(0.0, 1.0),
@@ -3502,7 +3502,7 @@ mod tests {
                 Some(NoObject),
                 None,
                 &mut context,
-                &surface.natural_uv_domain(),
+                &surface.natural_uv_domain_if_built(),
                 Vec3::ZERO,
                 Vec3::ZERO,
                 None,
@@ -3621,7 +3621,7 @@ mod tests {
             key: crate::geom::attribute::ObjectKey(50_001),
         }));
         surface.set_owner_zone_tol_3d(Some(1e-5));
-        let domain = surface.natural_uv_domain();
+        let domain = surface.natural_uv_domain_if_built();
         let mut context = NumericalTrimContext {
             builds: 0,
             tests: core::cell::Cell::new(0),
@@ -3699,7 +3699,7 @@ mod tests {
         let hit = s
             .local_line_intersect(
                 k,
-                &s.natural_uv_domain(),
+                &s.natural_uv_domain_if_built(),
                 Vec3::new(1.0, 1.5, -2.0),
                 Vec3::new(0.0, 0.0, 1.0),
                 &Extent1d::from_min_max(-10.0, 10.0),
@@ -3789,7 +3789,7 @@ mod tests {
             .global_curve_intersect(
                 &k,
                 [Opaque::Curve, Opaque::Surface],
-                &s.natural_uv_domain(),
+                &s.natural_uv_domain_if_built(),
                 &c,
                 &c.natural_interval(),
                 1e-6,

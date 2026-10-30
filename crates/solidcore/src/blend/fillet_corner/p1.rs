@@ -567,7 +567,7 @@ pub fn create_srf_of_revolution(
 
     // Check for OtherCurve/SurfOfRevolution coincidence
     let ivl = other_curve.natural_interval();
-    let uv_domain = surface.natural_uv_domain();
+    let uv_domain = surface.natural_uv_domain_with_nurb(k)?;
     let found = surface.simple_coincidence_checker::<ObjectHandle>(
         k,
         &uv_domain,
@@ -946,8 +946,9 @@ impl FilletCorner {
         ext_surface: Surface,
     ) -> bool {
         if let Some(old_surface) = map.get(&original_face) {
-            let new_domain = ext_surface.natural_uv_domain();
-            let old_domain = old_surface.natural_uv_domain();
+            // (kernel-free: a lazy analytic answers its NURB-less base's empty domain)
+            let new_domain = ext_surface.natural_uv_domain_if_built();
+            let old_domain = old_surface.natural_uv_domain_if_built();
             if new_domain.is_contained_by(&old_domain, EFF_ZERO) {
                 // Old domain was bigger, delete the new ext surface.
                 return false;
@@ -1184,7 +1185,10 @@ pub fn check_nx1_degeneracy_status(
         match eu3::evaluate_binormal(k, b, eu, t, false, &options) {
             Ok(e) => Ok(Ok(e.face_normal)),
             Err(e @ (SolidError::Unported { .. } | SolidError::NotFound { .. })) => Err(e),
-            Err(e @ SolidError::InvalidInput { reason, .. }) if reason == NULL_DEREF => Err(e),
+            Err(
+                e @ (SolidError::InvalidInput { reason, .. }
+                | SolidError::PortInvariant { reason, .. }),
+            ) if reason == NULL_DEREF => Err(e),
             Err(e) => Ok(Err(e)),
         }
     };
@@ -1196,7 +1200,15 @@ pub fn check_nx1_degeneracy_status(
         Ok(n) => n,
         Err(e) => return Ok(Err(e)),
     };
-    // Check if faceuse normals are parallel to each other
+    // Check if faceuse normals are parallel to each other. With
+    // `fillet_knife_edge_rounds` (WR-570, fork b7ec55b) anti-parallel normals are a cusp
+    // (the faces folded back on each other, a knife edge): the ball touches them back
+    // from the vertex and the fillet ends there as at any other corner
+    if k.fixes.fillet_knife_edge_rounds {
+        // (`bAntiParallel` starts FALSE; `IsParallelTo` leaves it for a zero vector)
+        let (parallel, anti) = faceuse_normal1.parallel_sense(faceuse_normal2, EFF_ZERO_SQRT);
+        return Ok(Ok(parallel && !anti.unwrap_or(false)));
+    }
     Ok(Ok(
         faceuse_normal1.is_parallel_to(faceuse_normal2, EFF_ZERO_SQRT)
     ))
@@ -1531,7 +1543,7 @@ impl FilletCorner {
         let runs_on = surface
             .simple_coincidence_checker_with_context(
                 k,
-                &surface.natural_uv_domain(),
+                &surface.natural_uv_domain_with_nurb(k)?,
                 &curve,
                 &interval,
                 self.approx_tol_3d,
@@ -2094,7 +2106,7 @@ impl FilletCorner {
 
         // for every m_Surfaces->Surface - build 1 face with natural edge boundaries
         for surface in self.surfaces.clone() {
-            let uv_domain = surface.natural_uv_domain();
+            let uv_domain = surface.natural_uv_domain_with_nurb(env.k)?;
 
             // Add surface Natural IsoParameter boundaries to s3DCurves array
             let mut curves_3d = Vec::new();
@@ -2251,7 +2263,7 @@ impl FilletCorner {
         let surface0 = env
             .pseudo
             .geom(fg0)?
-            .fillet_surface()?
+            .fillet_surface(None)?
             .cloned()
             .ok_or_else(null)?;
         let prim_eu1 = prim_of(env.pseudo, edge1)?;
@@ -2263,7 +2275,7 @@ impl FilletCorner {
         let surface1 = env
             .pseudo
             .geom(fg1)?
-            .fillet_surface()?
+            .fillet_surface(None)?
             .cloned()
             .ok_or_else(null)?;
 
@@ -2278,7 +2290,7 @@ impl FilletCorner {
 
         // Drop both ends of base curve onto two fillets
         let drop_uv = |k: &Kernel, surface: &Surface, p: Point3| -> Result<Point2> {
-            let uv_domain = surface.natural_uv_domain();
+            let uv_domain = surface.natural_uv_domain_with_nurb(k)?;
             let solutions = surface.global_point_solve::<ObjectHandle>(
                 k,
                 None,
@@ -2477,7 +2489,7 @@ impl FilletCorner {
 
         env.pseudo
             .geom(new_fg)?
-            .fillet_surface()?
+            .fillet_surface(None)?
             .cloned()
             .ok_or_else(deref)
     }
@@ -2744,7 +2756,7 @@ fn loop_orientation(
     patch_normal: Vec3,
     op: &'static str,
 ) -> Result<OrientType> {
-    let uv_domain = surface.natural_uv_domain();
+    let uv_domain = surface.natural_uv_domain_with_nurb(k)?;
     let solutions = surface.global_point_solve::<ObjectHandle>(
         k,
         None,
@@ -2787,7 +2799,7 @@ fn make_face(
         .fillet
         .as_mut()
         .ok_or_else(|| SolidError::invalid_input(op, NULL_DEREF))?;
-    let uv_domain = surface.natural_uv_domain();
+    let uv_domain = surface.natural_uv_domain_with_nurb(env.k)?;
     let region = fillet.brep.infinite_region();
     let key_of = fillet.notify.key_of;
     let face_ref = |f: FaceId| key_of(EntityRef::Face(f));

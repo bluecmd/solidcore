@@ -2543,7 +2543,15 @@ pub fn mirror_curve(
 pub fn is_iso_curve_at(curve: &Curve, side: SurfParamType, low: f64, tol_2d: f64) -> Result<bool> {
     let canon = match bspline_of(curve).and_then(|c| c.canonical()) {
         Ok(c) => c,
-        Err(e) if e.is_unported() || matches!(e, SolidError::InvalidInput { .. }) => return Err(e),
+        Err(e)
+            if e.is_unported()
+                || matches!(
+                    e,
+                    SolidError::InvalidInput { .. } | SolidError::PortInvariant { .. }
+                ) =>
+        {
+            return Err(e)
+        }
         Err(_) => return Ok(true),
     };
     let coord = usize::from(side != SurfParamType::U);
@@ -2630,7 +2638,7 @@ mod tests {
         let mut b = p3::new_brep(&mut k, tol::USE_DEFAULT, tol::USE_DEFAULT).unwrap();
         let serial = p3::notify_serial(&mut k.context, &mut b).unwrap();
         let key_of = |entity| p3::topology_ref(serial, entity);
-        let mut records = std::collections::BTreeMap::new();
+        let mut records = crate::topology::topology::NotifyRecords::new();
         p3::seed_records(&mut records, &b, &key_of);
         let mut attributes = AttributeStore::default();
         let mut surface = Surface::new(SurfaceKind::Plane(Plane::from_normal(
@@ -2709,7 +2717,7 @@ mod tests {
             let mut b = p3::new_brep(&mut k, tol::USE_DEFAULT, tol::USE_DEFAULT).unwrap();
             let serial = p3::notify_serial(&mut k.context, &mut b).unwrap();
             let key_of = |entity| p3::topology_ref(serial, entity);
-            let mut records = std::collections::BTreeMap::new();
+            let mut records = crate::topology::topology::NotifyRecords::new();
             p3::seed_records(&mut records, &b, &key_of);
             let mut attributes = AttributeStore::default();
             let mut surface = if mode == 2 {
@@ -3096,7 +3104,7 @@ mod tests {
                     if a.y == z.y {
                         continue;
                     }
-                    a.x = surface.natural_uv_domain().max().x;
+                    a.x = surface.natural_uv_domain_if_built().max().x;
                     z.x = a.x;
                     if eu1::orientation(&b, eu).unwrap() == OrientType::Opposite {
                         core::mem::swap(&mut a, &mut z);
@@ -3134,7 +3142,7 @@ mod tests {
                 // retain its failure, even though both seam sides map to the same
                 // points in 3D. No endpoint here comes from projection.
                 let eus = loop_edgeuses(&b, l).unwrap();
-                let d = surface.natural_uv_domain();
+                let d = surface.natural_uv_domain_if_built();
                 let (u0, u1, v0, v1) = (d.min().x, d.max().x, d.min().y, d.max().y);
                 let corners = [
                     ([u0, v1], [u0, v0]),
@@ -3201,7 +3209,7 @@ mod tests {
                 continue;
             };
             let (mut a, mut z) = edge_uv_ends(&k, &mut b, eu).unwrap();
-            a.x = surface.natural_uv_domain().max().x;
+            a.x = surface.natural_uv_domain_if_built().max().x;
             z.x = a.x;
             if eu1::orientation(&b, eu).unwrap() == OrientType::Opposite {
                 core::mem::swap(&mut a, &mut z);

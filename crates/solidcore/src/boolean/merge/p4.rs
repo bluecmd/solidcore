@@ -57,7 +57,9 @@ use crate::EntityRef;
 mod arena_pair;
 mod kernel_adapter;
 mod notification_keys;
-pub(crate) use kernel_adapter::{adopt_namespace_owners, notification_key};
+pub(crate) use kernel_adapter::{
+    adopt_namespace_owners, entity_of_notification_key, notification_key,
+};
 pub use kernel_adapter::{KernelManifoldIntersector, ManifoldKernelAdapter};
 pub use notification_keys::ManifoldNotificationKeys;
 
@@ -275,6 +277,7 @@ pub trait ManifoldIntersector {
         &mut self,
         kernels: &mut BooleanKernels<'_>,
         primary: &mut Brep,
+        attributes: &mut AttributeStore,
         state: &ManifoldState,
         check_all_edges: bool,
     ) -> Result<()>;
@@ -1441,7 +1444,7 @@ fn editing_stages(
                 | BooleanOperation::Slice
         )
     {
-        intersector.post_process(kernels, primary, state, false)?;
+        intersector.post_process(kernels, primary, attributes, state, false)?;
     }
     Ok(false)
 }
@@ -1692,7 +1695,7 @@ fn manifold_boolean_translated(
         if let Some(a) = primary.as_mut() {
             let editing = a.editing_enabled();
             a.set_editing_enabled(true);
-            let mut records = std::collections::BTreeMap::new();
+            let mut records = crate::topology::topology::NotifyRecords::new();
             let mut env = edge::NotifyEnv {
                 records: &mut records,
                 attributes: &mut *attributes,
